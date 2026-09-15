@@ -4,37 +4,30 @@ import { useEffect, useState } from 'react';
 import { AlertCircle, CheckCircle2, XCircle } from 'lucide-react';
 import clsx from 'clsx';
 import { RiskBadge } from '../ui/RiskBadge';
-import { deriveRisk } from '../../lib/risk';
+import { buildPredictiveRiskByAgentName, PredictiveRiskEntry } from '../../lib/predictiveRisk';
 import type { Agent, RiskLevel } from '../../types';
+import { predictiveApi } from '../../lib/api';
+import { useAgents } from '../../lib/useAgents';
 
 export function AgentTable() {
-  const [agents, setAgents] = useState<Agent[]>([]);
-  const [loading, setLoading] = useState(true);
+  const { agents, loading: agentsLoading, error } = useAgents();
+  const [riskByAgentName, setRiskByAgentName] = useState<Map<string, PredictiveRiskEntry>>(new Map());
+  const [predictiveLoaded, setPredictiveLoaded] = useState(false);
 
   useEffect(() => {
-    const base = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '') ?? 'http://localhost:3000';
-    fetch(`${base}/api/agents`)
-      .then(r => r.json())
-      .then(data => {
-        if (Array.isArray(data)) {
-          setAgents(data.map(a => ({
-            ...a,
-            department: a.department || (a.owner && a.owner.department) || 'Unassigned',
-            criticality: a.risk || a.criticality || 'low',
-            owner: typeof a.owner === 'object' && a.owner ? a.owner.name : a.owner,
-            backup_owner: typeof a.backup_owner === 'object' && a.backup_owner ? a.backup_owner.name : a.backup_owner
-          })));
-        } else {
-          setAgents([]);
-        }
-      })
-      .catch(() => setAgents([]))
-      .finally(() => setLoading(false));
+    predictiveApi.agents()
+      .catch(() => [])
+      .then((predictiveData) => setRiskByAgentName(buildPredictiveRiskByAgentName(predictiveData)))
+      .finally(() => setPredictiveLoaded(true));
   }, []);
 
+  const loading = agentsLoading || !predictiveLoaded;
+
+  const riskOf = (agent: Agent): RiskLevel => riskByAgentName.get(agent.name)?.threatLevel ?? 'unknown';
+
   const sortedAgents = [...agents].sort((a, b) => {
-    const w: Record<RiskLevel, number> = { critical: 4, high: 3, medium: 2, low: 1 };
-    return w[deriveRisk(b)] - w[deriveRisk(a)];
+    const w: Record<RiskLevel, number> = { critical: 4, high: 3, medium: 2, low: 1, unknown: 0 };
+    return w[riskOf(b)] - w[riskOf(a)];
   });
 
   return (
@@ -54,13 +47,19 @@ export function AgentTable() {
         </div>
       )}
 
-      {!loading && agents.length === 0 && (
-        <div className="p-8 text-center text-xs text-[color:var(--text-tertiary)]">
-          No agents found — check /api/agents
+      {!loading && error && (
+        <div className="p-8 text-center text-xs text-red-400">
+          Could not load the agent directory — {error}
         </div>
       )}
 
-      {!loading && agents.length > 0 && (
+      {!loading && !error && agents.length === 0 && (
+        <div className="p-8 text-center text-xs text-[color:var(--text-tertiary)]">
+          No agents recorded.
+        </div>
+      )}
+
+      {!loading && !error && agents.length > 0 && (
         <div className="overflow-x-auto">
           <table className="w-full text-left border-collapse">
             <thead>
@@ -74,7 +73,7 @@ export function AgentTable() {
             </thead>
             <tbody className="divide-y divide-[var(--border-subtle)]">
               {sortedAgents.map((agent) => {
-                const risk = deriveRisk(agent);
+                const risk = riskOf(agent);
                 return (
                   <tr key={agent.id} className="hover:bg-[var(--bg-hover)] transition-colors group">
                     <td className="px-6 py-4">

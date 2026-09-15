@@ -20,49 +20,50 @@ import {
   Sun,
   Moon,
   Activity,
-  Network,
   Bell,
-  MessageCircle,
   Search,
   LogOut,
+  KeyRound,
 } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useTheme } from '@/lib/ThemeContext';
 import { useGlobalPanels } from '@/components/global/GlobalPanelsContext';
 import { useAuth } from '@/lib/AuthContext';
 
-type NavItem = { name: string; href: string; icon: LucideIcon; roles?: string[] };
+type NavItem = { name: string; href: string; icon: LucideIcon };
 
-// Role gating for the Role-Based Executive Experience.
-const EXEC = ['admin', 'ceo', 'cto', 'coo'];
-const MANAGER_UP = [...EXEC, 'manager'];
-
+// FE-4: this used to filter nav items by role (EXEC/MANAGER_UP allowlists).
+// D-05 deleted requireRole() server-side, so any authenticated user could
+// already reach any of these routes directly by URL — the filtering only
+// ever hid a link, never enforced a boundary, so it read as an access
+// control that did not exist. Every nav item is visible to every
+// authenticated user now, matching what the server actually allows. If
+// role-based access is wanted later, it needs a real server-side check
+// (see FE-4 in the decision log) — a client-side nav filter is not it.
 const navigation: NavItem[] = [
   { name: 'Dashboard',              href: '/',                icon: LayoutDashboard },
   { name: 'Ownership',              href: '/ownership',       icon: Users },
-  { name: 'Risk Intelligence',      href: '/risk',            icon: ShieldAlert, roles: MANAGER_UP },
+  { name: 'Risk Intelligence',      href: '/risk',            icon: ShieldAlert },
   { name: 'Dependency Map',         href: '/map',             icon: GitFork },
-  { name: 'What-If Simulation',     href: '/simulation',      icon: Zap, roles: EXEC },
-  { name: 'Recommendations',        href: '/recommendations', icon: ListChecks, roles: MANAGER_UP },
+  { name: 'What-If Simulation',     href: '/simulation',      icon: Zap },
+  { name: 'Recommendations',        href: '/recommendations', icon: ListChecks },
   { name: 'AI Tool Intelligence',   href: '/ai-tools',        icon: Bot },
   { name: 'Knowledge Risk',         href: '/knowledge',       icon: Brain },
-  { name: 'Org Memory',             href: '/memory',          icon: Archive, roles: MANAGER_UP },
-  { name: 'Decision Intelligence',  href: '/decision',        icon: Scale, roles: EXEC },
-  { name: 'Continuity & Gov',       href: '/continuity',      icon: Activity, roles: MANAGER_UP },
+  { name: 'Org Memory',             href: '/memory',          icon: Archive },
+  { name: 'Decision Intelligence',  href: '/decision',        icon: Scale },
+  { name: 'Continuity & Gov',       href: '/continuity',      icon: Activity },
   { name: 'Workflows',              href: '/workflows',       icon: Workflow },
-  { name: 'Forecast',               href: '/forecast',        icon: TrendingUp, roles: MANAGER_UP },
-  { name: 'Org Science',            href: '/org-science',     icon: FlaskConical, roles: EXEC },
-  { name: 'Admin',                  href: '/admin',           icon: Settings, roles: ['admin', 'ceo', 'cto'] },
+  { name: 'Forecast',               href: '/forecast',        icon: TrendingUp },
+  { name: 'Org Science',            href: '/org-science',     icon: FlaskConical },
+  { name: 'Admin',                  href: '/admin',           icon: Settings },
 ];
 
 export function Sidebar() {
   const pathname = usePathname();
   const { theme, toggleTheme } = useTheme();
-  const { toggleNotificationPanel, toggleAvatarPanel, toggleSearch } = useGlobalPanels();
+  const { toggleNotificationPanel, toggleSearch } = useGlobalPanels();
   const { user, logout } = useAuth();
 
-  const role = (user?.role || 'employee').toLowerCase();
-  const visibleNav = navigation.filter((item) => !item.roles || item.roles.includes(role));
   const displayName = user?.name || user?.email || 'Executive';
   const displayOrg = user?.org ? String(user.org) : 'Workspace';
   const initials =
@@ -202,7 +203,7 @@ export function Sidebar() {
           Intelligence
         </p>
 
-        {visibleNav.map((item) => {
+        {navigation.map((item) => {
           const isActive = pathname === item.href;
           return (
             <Link
@@ -369,35 +370,6 @@ export function Sidebar() {
             <Bell size={16} />
           </button>
 
-          {/* Avatar Voice Button */}
-          <button
-            onClick={toggleAvatarPanel}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              width: '32px',
-              height: '32px',
-              borderRadius: '8px',
-              backgroundColor: 'transparent',
-              border: '1px solid transparent',
-              color: 'var(--text-secondary)',
-              cursor: 'pointer',
-              transition: 'all 0.2s ease',
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.backgroundColor = 'var(--bg-hover)';
-              e.currentTarget.style.color = 'var(--text-primary)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.backgroundColor = 'transparent';
-              e.currentTarget.style.color = 'var(--text-secondary)';
-            }}
-            aria-label="OBA Assistant"
-          >
-            <MessageCircle size={16} />
-          </button>
-
           {/* Theme Toggle Button */}
           <button
             onClick={toggleTheme}
@@ -427,6 +399,28 @@ export function Sidebar() {
           >
             {theme === 'dark' ? <Sun size={16} /> : <Moon size={16} />}
           </button>
+
+          {/* Account — change your own password. Ungated: every signed-in user
+              has one, whatever their role. */}
+          <Link
+            href="/account"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: '32px',
+              height: '32px',
+              borderRadius: '8px',
+              backgroundColor: pathname === '/account' ? 'var(--bg-hover)' : 'transparent',
+              border: '1px solid transparent',
+              color: pathname === '/account' ? 'var(--accent)' : 'var(--text-secondary)',
+              transition: 'all 0.2s ease',
+              flexShrink: 0,
+            }}
+            aria-label="Account settings"
+          >
+            <KeyRound size={16} />
+          </Link>
 
           {/* Logout Button */}
           <button

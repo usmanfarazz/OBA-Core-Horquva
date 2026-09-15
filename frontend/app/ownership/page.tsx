@@ -8,45 +8,78 @@ import { DependencyPipeline } from '../../components/ownership/DependencyPipelin
 import { HumanDependencyRisks } from '../../components/ownership/HumanDependencyRisks';
 import { OrgRelationshipMap } from '../../components/ownership/OrgRelationshipMap';
 import { AccountabilityChainTable } from '../../components/dashboard/AccountabilityChainTable';
-import { Dataset } from '../../types';
+import { request, predictiveApi, agentsApi } from '../../lib/api';
+import { normalizeAgent, normalizeWorkflow, RawAgent, RawWorkflow } from '../../lib/normalize';
+import { AITool, Dataset, Employee } from '../../types';
+import { buildPredictiveRiskByAgentName, PredictiveRiskEntry } from '../../lib/predictiveRisk';
+import { DependencyRiskProfile } from '../../components/ownership/HumanDependencyRisks';
+
+interface RawOwnerRow {
+  name?: string;
+  isHumanSpof?: boolean;
+  dependencyRiskScore?: number;
+  dependencyRiskTier?: string;
+  ownedWorkflowCount?: number;
+  criticalWorkflowCount?: number;
+  ownedToolCount?: number;
+  unbackedToolCount?: number;
+}
 
 export default function OwnershipPage() {
   const [dataset, setDataset] = useState<Dataset | null>(null);
+  const [riskByAgentName, setRiskByAgentName] = useState<Map<string, PredictiveRiskEntry>>(new Map());
+  const [humanSpofOwners, setHumanSpofOwners] = useState<Set<string>>(new Set());
+  const [dependencyRiskByName, setDependencyRiskByName] = useState<Map<string, DependencyRiskProfile>>(new Map());
+  const [employees, setEmployees] = useState<Employee[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    const base = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '') ?? 'http://localhost:3000';
-    
-    Promise.all([
-      fetch(`${base}/api/agents`).then(r => r.ok ? r.json() : []),
-      fetch(`${base}/api/tools`).then(r => r.ok ? r.json() : []),
-      fetch(`${base}/api/workflows/intelligence`).then(r => r.ok ? r.json() : { workflows: [] })
+  // Pulled out of the mount effect so a successful ownership assignment can
+  // re-run exactly the same load instead of a full page reload.
+  function loadOwnershipData() {
+    // agents/tools/workflows/ownership are this page's own dataset -- an
+    // outage here must fail the page (the existing `error` branch below),
+    // not render "Ownership Intelligence" with zero owners and zero agents.
+    // predictive-risk is a supplementary overlay (risk tiers layered onto
+    // agents already loaded), so it keeps its soft fallback. employees
+    // (needed only for the assign-owner dropdown) is the same tier as
+    // predictive-risk -- its absence disables assignment, it doesn't blank
+    // the page.
+    return Promise.all([
+      request<RawAgent[]>('/api/agents'),
+      request<Record<string, unknown>[]>('/api/tools'),
+      request<RawWorkflow[]>('/api/workflows'),
+      predictiveApi.agents().catch(() => []),
+      request<{ owners: RawOwnerRow[] }>('/api/ownership'),
+      request<Employee[]>('/api/employees').catch(() => []),
     ])
-    .then(([agentsData, toolsData, wfsData]) => {
-      const agents = Array.isArray(agentsData) ? agentsData.map((a: any) => ({
-        ...a,
-        owner: typeof a.owner === 'object' && a.owner ? a.owner.name : a.owner,
-        backup_owner: typeof a.backup_owner === 'object' && a.backup_owner ? a.backup_owner.name : a.backup_owner,
-        criticality: a.risk || a.criticality || 'low',
-        department: a.department || (a.owner?.department) || 'Unassigned',
-        documented: true,
-      })) : [];
+    .then(([agentsData, toolsData, wfsData, predictiveData, ownershipData, employeesData]) => {
+      setRiskByAgentName(buildPredictiveRiskByAgentName(predictiveData));
+      const ownerRows = Array.isArray(ownershipData.owners) ? ownershipData.owners : [];
+      setHumanSpofOwners(new Set(ownerRows.filter((o: RawOwnerRow) => o.isHumanSpof && o.name).map((o: RawOwnerRow) => o.name as string)));
+      setDependencyRiskByName(new Map(
+        ownerRows
+          .filter((o: RawOwnerRow) => o.name && o.dependencyRiskScore != null)
+          .map((o: RawOwnerRow) => [o.name as string, {
+            totalRiskScore: o.dependencyRiskScore,
+            tier: o.dependencyRiskTier,
+            ownedWorkflowCount: o.ownedWorkflowCount,
+            criticalWorkflowCount: o.criticalWorkflowCount,
+            ownedToolCount: o.ownedToolCount,
+            unbackedToolCount: o.unbackedToolCount,
+          } as DependencyRiskProfile])
+      ));
+      const agents = Array.isArray(agentsData) ? agentsData.map(normalizeAgent) : [];
+      setEmployees(Array.isArray(employeesData) ? employeesData : []);
 
-      const ai_tools = Array.isArray(toolsData) ? toolsData.map((t: any) => ({
+      const ai_tools = Array.isArray(toolsData) ? toolsData.map((t: Record<string, unknown>) => ({
         ...t,
         access_owner: t.owner || t.access_owner || 'Unassigned',
         backup_tool: t.backupAssigned ? 'Yes' : null,
-        users: [], 
-      })) : [];
+        users: [],
+      } as unknown as AITool)) : [];
 
-      const workflows = Array.isArray(wfsData.workflows) ? wfsData.workflows.map((w: any) => ({
-        name: w.workflow,
-        owner: w.owner?.name || null,
-        backup_owner: w.totalTools > 1 ? 'Yes' : null, // Fallback heuristic
-        department: 'Operations', // Fallback
-        criticality: w.riskScore > 50 ? 'critical' : 'medium',
-      })) : [];
+      const workflows = Array.isArray(wfsData) ? wfsData.map(normalizeWorkflow) : [];
 
       setDataset({
         company: 'Horquva',
@@ -56,14 +89,27 @@ export default function OwnershipPage() {
         ai_tools,
         workflows,
       });
-    })
-    .catch((err) => {
-      setError(err.message);
-    })
-    .finally(() => {
-      setLoading(false);
     });
+  }
+
+  useEffect(() => {
+    loadOwnershipData()
+      .catch((err) => {
+        setError(err.message);
+      })
+      .finally(() => {
+        setLoading(false);
+      });
   }, []);
+
+  // DATA-1's first write path: assign an owner, then reload the page's own
+  // dataset so every derived view (coverage score, human-SPOF set, dependency
+  // risk) reflects the change immediately instead of only the one row that
+  // changed.
+  async function handleAssignOwner(agentId: string, ownerId: number) {
+    await agentsApi.assignOwner(Number(agentId), ownerId);
+    await loadOwnershipData();
+  }
 
   if (loading) {
     return (
@@ -96,17 +142,23 @@ export default function OwnershipPage() {
         <p className="text-[color:var(--text-secondary)] mt-1">Human-agent dependency map identifying single points of failure and coverage gaps.</p>
       </div>
 
-      <OwnershipOverview agents={dataset.agents} />
+      <OwnershipOverview agents={dataset.agents} humanSpofOwners={humanSpofOwners} />
 
       <div className="mt-8">
         <AccountabilityChainTable />
       </div>
 
       <ConcentrationBar agents={dataset.agents} />
-      <DependencyPipeline dataset={dataset} />
-      <HumanDependencyRisks dataset={dataset} />
+      <DependencyPipeline dataset={dataset} riskByAgentName={riskByAgentName} humanSpofOwners={humanSpofOwners} />
+      <HumanDependencyRisks dataset={dataset} riskByAgentName={riskByAgentName} dependencyRiskByName={dependencyRiskByName} />
       <OrgRelationshipMap dataset={dataset} />
-      <OwnershipList agents={dataset.agents} />
+      <OwnershipList
+        agents={dataset.agents}
+        riskByAgentName={riskByAgentName}
+        humanSpofOwners={humanSpofOwners}
+        employees={employees}
+        onAssignOwner={handleAssignOwner}
+      />
     </div>
   );
 }

@@ -8,6 +8,23 @@ import { RiskScoreTable } from '../../components/risk/RiskScoreTable';
 import { OrgHealthBanner } from '../../components/risk/OrgHealthBanner';
 import { PredictedRiskPanel } from '../../components/risk/PredictedRiskPanel';
 import { Agent, Dependency } from '../../types';
+import { request, predictiveApi, healthApi, ApiError } from '../../lib/api';
+import { normalizeAgent, RawAgent } from '../../lib/normalize';
+import { buildPredictiveRiskByAgentName } from '../../lib/predictiveRisk';
+
+interface RawDependency {
+  source_id?: string | number;
+  target_id?: string | number;
+  dependency_type?: string;
+}
+
+interface RawSpof {
+  agentId?: string | number;
+}
+
+interface AgentSpofsResponse {
+  spofs: RawSpof[];
+}
 
 export default function RiskPage() {
   const [report, setReport] = useState<RiskIntelligenceReport | null>(null);
@@ -15,41 +32,40 @@ export default function RiskPage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const base = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '') ?? 'http://localhost:3000';
-    
     Promise.all([
-      fetch(`${base}/api/agents`).then(r => {
-        if (!r.ok) throw new Error('Failed to load agents');
-        return r.json();
-      }),
-      fetch(`${base}/api/dependencies`).then(r => {
-        if (!r.ok) throw new Error('Failed to load dependencies');
-        return r.json();
-      })
+      request<RawAgent[]>('/api/agents'),
+      request<{ dependencies: RawDependency[] }>('/api/dependencies'),
+      request<AgentSpofsResponse>('/api/dependencies/agent-spofs'),
+      predictiveApi.agents(),
+      healthApi.summary(),
     ])
-    .then(([agentsData, depsData]) => {
-      const agents: Agent[] = Array.isArray(agentsData) ? agentsData.map((a: any) => ({
-        ...a,
-        id: a.id?.toString() || '',
-        owner: typeof a.owner === 'object' && a.owner ? a.owner.name : a.owner,
-        backup_owner: typeof a.backup_owner === 'object' && a.backup_owner ? a.backup_owner.name : a.backup_owner,
-        criticality: a.risk || a.criticality || 'low',
-        department: a.department || (a.owner?.department) || 'Unassigned',
-        // Hardcode documented as true just to satisfy the frontend interface if backend missing it
-        documented: true,
-      })) : [];
+    .then(([agentsData, depsData, spofData, predictiveData, healthData]) => {
+      const agents: Agent[] = Array.isArray(agentsData) ? agentsData.map(normalizeAgent) : [];
 
-      const dependencies: Dependency[] = Array.isArray(depsData.dependencies) ? depsData.dependencies.map((d: any) => ({
+      const dependencies: Dependency[] = Array.isArray(depsData.dependencies) ? depsData.dependencies.map((d: RawDependency) => ({
         from: d.source_id?.toString() || '',
         to: d.target_id?.toString() || '',
-        type: d.dependency_type || 'sequential',
+        type: (d.dependency_type || 'normal') as Dependency['type'],
       })) : [];
 
-      const calculatedReport = computeRiskIntelligence(agents, dependencies);
+      const spofAgentIds = new Set<string>(
+        (spofData.spofs || []).map((s: RawSpof) => s.agentId?.toString() || '')
+      );
+      const riskByAgentName = buildPredictiveRiskByAgentName(predictiveData);
+      const orgHealth = healthData
+        ? { healthIndex: healthData.healthIndex ?? null, healthStatus: (healthData.healthStatus ?? null) as 'STABLE' | 'WARNING' | 'CRITICAL' | null }
+        : null;
+      const calculatedReport = computeRiskIntelligence(
+        agents,
+        dependencies,
+        spofAgentIds,
+        riskByAgentName,
+        orgHealth
+      );
       setReport(calculatedReport);
     })
-    .catch((err) => {
-      setError(err.message);
+    .catch((err: unknown) => {
+      setError(err instanceof ApiError ? `${err.status} — ${err.message}` : 'Failed to load risk intelligence data');
     })
     .finally(() => {
       setLoading(false);
@@ -83,19 +99,19 @@ export default function RiskPage() {
       <RiskScoreTable
         agents={report.highAgents}
         title="High Risk Agents"
-        subtitle="Score ≥ 40 — Escalate to department heads"
+        subtitle="Score ≥ 55 — Escalate to department heads"
         tier="HIGH"
       />
       <RiskScoreTable
         agents={report.mediumAgents}
         title="Medium Risk Agents"
-        subtitle="Score ≥ 20 — Monitor and schedule review"
+        subtitle="Score ≥ 35 — Monitor and schedule review"
         tier="MEDIUM"
       />
       <RiskScoreTable
         agents={report.lowAgents}
         title="Low Risk Agents"
-        subtitle="Score < 20 — Well-governed, continue maintaining"
+        subtitle="Score < 35 — Well-governed, continue maintaining"
         tier="LOW"
       />
       <OrgHealthBanner report={report} />

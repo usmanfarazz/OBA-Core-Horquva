@@ -1,11 +1,69 @@
-import { Agent } from '../../types';
-import { deriveRisk } from '../../lib/risk';
+import { useState } from 'react';
+import { Agent, Employee } from '../../types';
+import { PredictiveRiskEntry } from '../../lib/predictiveRisk';
 import { RiskBadge } from '../ui/RiskBadge';
-import { AlertCircle, CheckCircle2, ShieldAlert, XCircle, ChevronRight } from 'lucide-react';
+import { AlertCircle, CheckCircle2, ShieldAlert, XCircle, ChevronRight, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
 
 interface OwnershipListProps {
   agents: Agent[];
+  riskByAgentName: Map<string, PredictiveRiskEntry>;
+  /** Owner names flagged by the backend's isHumanSpof (>=3 unbacked agents,
+   *  GET /api/ownership) -- replaces this component's own independently-coded
+   *  `coverageScore === 0 && totalAgents >= 3` check. */
+  humanSpofOwners: Set<string>;
+  /** For the assign-owner control below -- empty while /api/employees is
+   *  still loading or unavailable, in which case the control just doesn't
+   *  render rather than offering an empty dropdown. */
+  employees: Employee[];
+  /** DATA-1's first write path: PATCH /api/agents/:id/owner, then reload the
+   *  page's dataset. Rejects on failure -- the control below surfaces that
+   *  inline rather than swallowing it. */
+  onAssignOwner: (agentId: string, ownerId: number) => Promise<void>;
+}
+
+function AssignOwnerControl({ agentId, employees, onAssign }: { agentId: string; employees: Employee[]; onAssign: (agentId: string, ownerId: number) => Promise<void> }) {
+  const [selected, setSelected] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  if (employees.length === 0) return null;
+
+  const handleAssign = () => {
+    if (!selected) return;
+    setSubmitting(true);
+    setError(null);
+    onAssign(agentId, Number(selected))
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : 'Failed to assign owner'))
+      .finally(() => setSubmitting(false));
+  };
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <div className="flex items-center gap-2">
+        <select
+          value={selected}
+          onChange={(e) => setSelected(e.target.value)}
+          disabled={submitting}
+          className="text-xs bg-[var(--bg-hover)] border border-[var(--border-default)] rounded px-2 py-1.5 text-[color:var(--text-primary)] disabled:opacity-50"
+        >
+          <option value="">Assign owner…</option>
+          {employees.map((e) => (
+            <option key={e.id} value={e.id}>{e.name}{e.department ? ` — ${e.department}` : ''}</option>
+          ))}
+        </select>
+        <button
+          onClick={handleAssign}
+          disabled={!selected || submitting}
+          className="text-xs font-medium px-3 py-1.5 rounded-md bg-amber-500/10 border border-amber-500/30 text-amber-400 hover:bg-amber-500/20 transition-colors disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5"
+        >
+          {submitting && <Loader2 className="w-3 h-3 animate-spin" />}
+          Assign
+        </button>
+      </div>
+      {error && <span className="text-[10px] text-red-400">{error}</span>}
+    </div>
+  );
 }
 
 type OwnerGroup = {
@@ -17,7 +75,7 @@ type OwnerGroup = {
   coverageScore: number;
 };
 
-export function OwnershipList({ agents }: OwnershipListProps) {
+export function OwnershipList({ agents, riskByAgentName, humanSpofOwners, employees, onAssignOwner }: OwnershipListProps) {
   // Group agents by owner
   const groupsRecord: Record<string, OwnerGroup> = {};
 
@@ -86,7 +144,7 @@ export function OwnershipList({ agents }: OwnershipListProps) {
               <div>
                 <h3 className="text-xl font-semibold text-[color:var(--text-primary)] flex items-center">
                   {group.ownerName}
-                  {!group.isOrphaned && group.coverageScore === 0 && group.totalAgents >= 3 && (
+                  {!group.isOrphaned && humanSpofOwners.has(group.ownerName) && (
                     <span className="ml-4 flex items-center px-2 py-0.5 rounded text-[10px] font-bold bg-red-500/10 text-red-400 border border-red-500/20 uppercase tracking-widest shadow-[0_0_10px_rgba(239,68,68,0.2)]">
                       <span className="w-1.5 h-1.5 rounded-full bg-red-500 mr-1.5 animate-pulse"></span>
                       Human SPOF
@@ -149,7 +207,7 @@ export function OwnershipList({ agents }: OwnershipListProps) {
               </thead>
               <tbody className="divide-y divide-[var(--border-subtle)]">
                 {group.agents.map((agent) => {
-                  const risk = deriveRisk(agent);
+                  const risk = riskByAgentName.get(agent.name)?.threatLevel ?? 'unknown';
                   return (
                     <tr key={agent.id} className="hover:bg-[var(--bg-hover)] transition-colors group/row">
                       <td className="px-6 py-4">
@@ -181,9 +239,13 @@ export function OwnershipList({ agents }: OwnershipListProps) {
                         <RiskBadge level={risk} />
                       </td>
                       <td className="px-6 py-4 text-right">
-                         <button className="text-[color:var(--text-tertiary)] hover:text-[color:var(--text-primary)] transition-colors opacity-0 group-hover/row:opacity-100">
-                           <ChevronRight className="w-4 h-4" />
-                         </button>
+                         {group.isOrphaned ? (
+                           <AssignOwnerControl agentId={agent.id} employees={employees} onAssign={onAssignOwner} />
+                         ) : (
+                           <button className="text-[color:var(--text-tertiary)] hover:text-[color:var(--text-primary)] transition-colors opacity-0 group-hover/row:opacity-100">
+                             <ChevronRight className="w-4 h-4" />
+                           </button>
+                         )}
                       </td>
                     </tr>
                   );

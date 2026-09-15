@@ -2,7 +2,13 @@
 
 import { useEffect, useState } from 'react';
 import { Activity, Users, AlertTriangle, Link2 } from 'lucide-react';
-import { healthApi } from '../../lib/api';
+import { healthApi, request } from '../../lib/api';
+
+interface RiskSummary {
+  total: number;
+  orphaned: number;
+  breakdown?: { critical?: number };
+}
 
 interface KpiData {
   riskScore: number;
@@ -14,22 +20,24 @@ interface KpiData {
 export function KpiStrip() {
   const [data, setData] = useState<KpiData | null>(null);
   const [loading, setLoading] = useState(true);
+  // Card 3 used to read "All agents have owners" whenever orphanedAgents
+  // fell back to 0 -- which is exactly what a failed risk-summary fetch also
+  // produced. Tracking each source's failure separately lets every card show
+  // "—" and an honest caption instead of a fabricated governance claim.
+  const [riskSummaryFailed, setRiskSummaryFailed] = useState(false);
+  const [healthFailed, setHealthFailed] = useState(false);
 
   useEffect(() => {
-    const base = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '') ?? 'http://localhost:3000';
-
     Promise.all([
-      fetch(`${base}/api/agents`).then(r => r.json()).catch(() => []),
-      healthApi.summary().catch(() => null),
-    ]).then(([agents, health]) => {
-      const agentList = Array.isArray(agents) ? agents.map((a: any) => ({
-        ...a,
-        criticality: a.risk || a.criticality || 'low',
-        owner: typeof a.owner === 'object' && a.owner ? a.owner.name : a.owner,
-      })) : [];
-      const totalAgents    = agentList.length;
-      const orphanedAgents = agentList.filter((a: any) => !a.owner).length;
-      const criticalCount  = agentList.filter((a: any) => a.criticality === 'critical').length;
+      // Same counts the rest of the app uses (agents.js risk-summary), instead
+      // of re-deriving "orphaned"/"critical" client-side from the raw list —
+      // one definition of those counts, not two that can quietly drift apart.
+      request<RiskSummary>('/api/agents/risk-summary').catch(() => { setRiskSummaryFailed(true); return null; }),
+      healthApi.summary().catch(() => { setHealthFailed(true); return null; }),
+    ]).then(([riskSummary, health]) => {
+      const totalAgents    = riskSummary?.total ?? 0;
+      const orphanedAgents = riskSummary?.orphaned ?? 0;
+      const criticalCount  = riskSummary?.breakdown?.critical ?? 0;
       const riskScore      = health?.healthIndex ?? 0;
 
       setData({ riskScore, totalAgents, orphanedAgents, criticalCount });
@@ -60,7 +68,9 @@ export function KpiStrip() {
           <span className="text-sm font-medium text-[color:var(--text-secondary)]">Org Health Index</span>
           <Activity className="w-5 h-5 text-red-400 group-hover:scale-110 transition-transform duration-200" />
         </div>
-        {loading ? skeleton : (
+        {loading ? skeleton : healthFailed ? (
+          <p className="text-xs text-red-400 relative z-10">Could not load — try refreshing.</p>
+        ) : (
           <>
             <div className="flex items-baseline space-x-2 relative z-10">
               <h3 className="text-3xl font-semibold text-[color:var(--text-primary)]">{score}</h3>
@@ -82,7 +92,9 @@ export function KpiStrip() {
           <span className="text-sm font-medium text-[color:var(--text-secondary)]">Agents Found</span>
           <Users className="w-5 h-5 text-indigo-400 group-hover:scale-110 transition-transform duration-200" />
         </div>
-        {loading ? skeleton : (
+        {loading ? skeleton : riskSummaryFailed ? (
+          <p className="text-xs text-red-400 relative z-10">Could not load — try refreshing.</p>
+        ) : (
           <>
             <div className="flex items-baseline space-x-2 relative z-10">
               <h3 className="text-3xl font-semibold text-[color:var(--text-primary)]">{totalAgents}</h3>
@@ -102,7 +114,9 @@ export function KpiStrip() {
           <span className="text-sm font-medium text-[color:var(--text-secondary)]">Orphaned Agents</span>
           <AlertTriangle className={`w-5 h-5 text-amber-400 group-hover:scale-110 transition-transform duration-200 ${orphaned > 0 ? 'animate-pulse-soft' : ''}`} />
         </div>
-        {loading ? skeleton : (
+        {loading ? skeleton : riskSummaryFailed ? (
+          <p className="text-xs text-red-400 relative z-10">Could not load — try refreshing.</p>
+        ) : (
           <>
             <div className="flex items-baseline space-x-2 relative z-10">
               <h3 className="text-3xl font-semibold text-[color:var(--text-primary)]">{orphaned}</h3>
@@ -122,7 +136,9 @@ export function KpiStrip() {
           <span className="text-sm font-medium text-[color:var(--text-secondary)]">Critical Agents</span>
           <Link2 className="w-5 h-5 text-rose-400 group-hover:scale-110 transition-transform duration-200" />
         </div>
-        {loading ? skeleton : (
+        {loading ? skeleton : riskSummaryFailed ? (
+          <p className="text-xs text-red-400 relative z-10">Could not load — try refreshing.</p>
+        ) : (
           <>
             <div className="flex items-baseline space-x-2 relative z-10">
               <h3 className="text-3xl font-semibold text-[color:var(--text-primary)]">{critical}</h3>

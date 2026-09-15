@@ -1,30 +1,44 @@
 -- ============================================================
 -- OBA — MIGRATION 01: BASE ORGANIZATIONAL SCHEMA
 -- Creates all core organizational tables (M01–M20 foundation).
--- Run this FIRST in the Supabase SQL Editor, in this order:
---   01_schema_migration.sql   (this file — base tables)
---   02_seed_data.sql          (seed base data)
---   03_fizza_modules_schema.sql (intelligence module tables)
---   04_fizza_modules_seed.sql   (seed intelligence data)
--- Safe to re-run: it drops the base tables first, then recreates them.
+--
+-- ⛔ DO NOT RUN THIS FILE BY HAND. NOT IN THE SUPABASE SQL EDITOR,
+--    NOT WITH psql, NOT "just to check".
+--
+--    It begins with DROP TABLE across 42 tables. The whole team shares
+--    ONE database, so running it by hand destroys everyone's data —
+--    including human corrections and snapshots. It is safe for the
+--    SCHEMA and catastrophic for the DATA.
+--
+--    The only supported way to apply this file is:
+--        node run_migrations.js          (from backend/)
+--    which records it in `schema_migrations` and never re-applies it.
+--    `node run_migrations.js --dry-run` is always safe.
+--
+--    Never delete this file's row from `schema_migrations` — that is
+--    what makes the DROP below unreachable on a re-run.
+--
+--    See BUILD_SPEC Part A0 and Part F, threat 1.
+--
+-- Apply order is by filename: 01 → 02 → 03 → 04 → 05 → 06 → …
 -- Tables seeded with explicit ids use SERIAL so that the seed's
 -- setval('<table>_id_seq', N) calls work.
 -- ============================================================
 
--- ── Clean slate (safe re-run) ─────────────────────────────────
+-- ── DESTRUCTIVE. Reachable only on a first apply — see the header ──
 DROP TABLE IF EXISTS
   employees, ai_platforms, agents, owners, workflows,
-  employee_agent, agent_platform, dependencies, recommendations,
-  tool_ownership, tool_users, tool_backups, tool_policies, tool_spend,
+  employee_agent, agent_platform, dependencies,
+  tool_ownership, tool_users, tool_backups, tool_policies,
   workflow_dependencies, workflow_tool_dependencies, workflow_runbooks,
   workflow_failures, workflow_steps, knowledge_assets, snapshots,
   predictive_risk_scores, organizational_forecasts, forecast_findings,
-  collaboration_scores, collaboration_summary, organizational_decisions,
+  collaboration_scores, organizational_decisions,
   decision_factors, verification_actions, policy_violations,
-  workflow_orchestration, learning_snapshots, failure_patterns,
-  department_exposure, continuity_assessments, continuity_plans,
+  workflow_orchestration, learning_snapshots,
+  continuity_assessments, continuity_plans,
   governance_assessments, governance_gaps, accountability_entities,
-  accountability_links, accountability_scores, accountability_summary
+  accountability_links
 CASCADE;
 
 -- ── People, tools, agents, workflows ─────────────────────────
@@ -99,6 +113,18 @@ CREATE TABLE agent_platform (
   platform_id INTEGER
 );
 
+-- agent_source/agent_target duplicate source_id/target_id whenever both ends
+-- are agents (source_type='agent' AND target_type='agent'), and are NULL for
+-- every cross-type edge -- verified against 02_seed_data.sql, which populates
+-- them identically to source_id/target_id in that case and never otherwise.
+-- They exist only so PostgREST's FK-embedding syntax can pull a related
+-- agent's full row in one query (see 05_foreign_keys.sql's header comment on
+-- why 33 route handlers depend on declared FKs for exactly this). Safe to
+-- treat as redundant-by-design rather than a data-integrity risk: nothing
+-- writes to this table (D-04), so the two representations cannot drift.
+-- routes/simulations/agentFails.js is the one deliberate consumer of the FK
+-- pair; every other reader (derived.js, graphLoader.js, network.js, risks.js,
+-- export-company.js) uses only source_id/target_id (F-I).
 CREATE TABLE dependencies (
   id              SERIAL PRIMARY KEY,
   source_id       INTEGER,
@@ -109,15 +135,6 @@ CREATE TABLE dependencies (
   strength        INTEGER,
   agent_source    INTEGER,
   agent_target    INTEGER
-);
-
-CREATE TABLE recommendations (
-  id             SERIAL PRIMARY KEY,
-  asset_name     TEXT,
-  asset_type     TEXT,
-  priority       TEXT,
-  recommendation TEXT,
-  status         TEXT
 );
 
 -- ── Tool metadata ────────────────────────────────────────────
@@ -146,13 +163,6 @@ CREATE TABLE tool_policies (
   platform_id INTEGER,
   policy_name TEXT,
   status      TEXT
-);
-
-CREATE TABLE tool_spend (
-  id          SERIAL PRIMARY KEY,
-  platform_id INTEGER,
-  amount_usd  NUMERIC,
-  month       TEXT
 );
 
 -- ── Workflow detail tables ───────────────────────────────────
@@ -269,16 +279,6 @@ CREATE TABLE collaboration_scores (
   has_backup            BOOLEAN
 );
 
-CREATE TABLE collaboration_summary (
-  id                        SERIAL PRIMARY KEY,
-  ai_adoption_score         INTEGER,
-  adoption_level            TEXT,
-  human_dependency_score    INTEGER,
-  highest_dependency_employee TEXT,
-  collaboration_score       INTEGER,
-  collaboration_level       TEXT
-);
-
 -- ── Decisions & verification (M14–M16) ───────────────────────
 
 CREATE TABLE organizational_decisions (
@@ -341,25 +341,6 @@ CREATE TABLE learning_snapshots (
   mitigation_percentage  NUMERIC
 );
 
-CREATE TABLE failure_patterns (
-  id                SERIAL PRIMARY KEY,
-  asset_name        TEXT,
-  asset_type        TEXT,
-  appearance_count  INTEGER,
-  failure_severity  TEXT,
-  is_repeat_offender BOOLEAN,
-  reasons           TEXT[]
-);
-
-CREATE TABLE department_exposure (
-  id                     SERIAL PRIMARY KEY,
-  department             TEXT,
-  documentation_coverage NUMERIC,
-  backup_coverage        NUMERIC,
-  incident_exposure_score INTEGER,
-  incident_risk_level    TEXT
-);
-
 -- ── Continuity (M18) ─────────────────────────────────────────
 
 CREATE TABLE continuity_assessments (
@@ -418,22 +399,3 @@ CREATE TABLE accountability_links (
   raci_role   TEXT
 );
 
-CREATE TABLE accountability_scores (
-  id                 SERIAL PRIMARY KEY,
-  entity_id          INTEGER,
-  score              INTEGER,
-  status             TEXT,
-  same_r_and_a       BOOLEAN,
-  missing_responsible BOOLEAN,
-  missing_accountable BOOLEAN
-);
-
-CREATE TABLE accountability_summary (
-  id                   SERIAL PRIMARY KEY,
-  accountability_score INTEGER,
-  status               TEXT,
-  total_entities       INTEGER,
-  entities_with_links  INTEGER,
-  same_r_and_a_count   INTEGER,
-  unique_people_count  INTEGER
-);

@@ -7,54 +7,79 @@ import { DependencyTable } from '../../components/map/DependencyTable';
 import { BlastRadiusSimulator } from '../../components/map/BlastRadiusSimulator';
 import { DependencyEvolutionTab } from '../../components/map/DependencyEvolutionTab';
 import { HiddenDependencyOverlay } from '../../components/map/HiddenDependencyOverlay';
-import { getSPOFs, getDownstream } from '../../lib/graph';
+import { request, predictiveApi, ApiError } from '../../lib/api';
+import { normalizeAgent, RawAgent } from '../../lib/normalize';
+import { buildPredictiveRiskByAgentName, PredictiveRiskEntry } from '../../lib/predictiveRisk';
 import { Agent, Dependency } from '../../types';
+import { UnavailableBanner } from '../../components/ui/UnavailableBanner';
+
+interface AgentSpofsResponse {
+  spofs: { agentId: number; name: string; victimsCount: number }[];
+  spofCount: number;
+  maxCascadeRisk: number;
+}
+
+interface RawDependency {
+  source_type?: string;
+  target_type?: string;
+  source_id?: string | number;
+  target_id?: string | number;
+  dependency_type?: string;
+}
 
 export default function DependencyMapPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [dependencies, setDependencies] = useState<Dependency[]>([]);
+  const [spofData, setSpofData] = useState<AgentSpofsResponse | null>(null);
+  const [riskByAgentName, setRiskByAgentName] = useState<Map<string, PredictiveRiskEntry>>(new Map());
+  const [predictiveRiskUnavailable, setPredictiveRiskUnavailable] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const base = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '') ?? 'http://localhost:3000';
-    
     Promise.all([
-      fetch(`${base}/api/agents`).then(r => {
-        if (!r.ok) throw new Error('Failed to load agents');
-        return r.json();
+      request<RawAgent[]>('/api/agents'),
+      request<{ dependencies: RawDependency[] }>('/api/dependencies'),
+      // Server-computed — the canonical SPOF definition (sole owner, no
+      // backup, criticality >= high; see domain/definitions.js's
+      // spofVerdict()) lives in backend/routes/dependencies.js instead of
+      // being reimplemented here and in every component that needs to know
+      // which agents are SPOFs.
+      request<AgentSpofsResponse>('/api/dependencies/agent-spofs'),
+      // Soft fallback: agents/dependencies/SPOFs are this page's own
+      // dataset (an outage there fails the page, below), predictive risk is
+      // a supplementary overlay -- losing it means every agent's risk badge
+      // falls back to its own 'low' default (F-11) rather than blanking the
+      // map. predictiveRiskUnavailable makes that degrade visible (F-12).
+      predictiveApi.agents().catch(() => {
+        setPredictiveRiskUnavailable(true);
+        return [];
       }),
-      fetch(`${base}/api/dependencies`).then(r => {
-        if (!r.ok) throw new Error('Failed to load dependencies');
-        return r.json();
-      })
     ])
-    .then(([agentsData, depsData]) => {
-      const mappedAgents: Agent[] = Array.isArray(agentsData) ? agentsData.map((a: any) => ({
-        ...a,
-        id: a.id?.toString() || '',
-        owner: typeof a.owner === 'object' && a.owner ? a.owner.name : a.owner,
-        backup_owner: typeof a.backup_owner === 'object' && a.backup_owner ? a.backup_owner.name : a.backup_owner,
-        criticality: a.risk || a.criticality || 'low',
-        department: a.department || (a.owner?.department) || 'Unassigned',
-        documented: true,
-      })) : [];
+    .then(([agentsData, depsData, spofsData, predictiveData]) => {
+      setRiskByAgentName(buildPredictiveRiskByAgentName(predictiveData));
+      const mappedAgents: Agent[] = Array.isArray(agentsData) ? agentsData.map(normalizeAgent) : [];
 
-      const mappedDeps: Dependency[] = Array.isArray(depsData.dependencies) 
+      const mappedDeps: Dependency[] = Array.isArray(depsData.dependencies)
         ? depsData.dependencies
-          .filter((d: any) => d.source_type === 'agent' && d.target_type === 'agent')
-          .map((d: any) => ({
+          .filter((d: RawDependency) => d.source_type === 'agent' && d.target_type === 'agent')
+          .map((d: RawDependency) => ({
             from: d.source_id?.toString() || '',
             to: d.target_id?.toString() || '',
-            type: d.dependency_type || 'sequential',
-          })) 
+            // 'sequential' was a leftover from the old sunrise_care.json
+            // vocabulary (types/index.ts's own comment) and isn't a valid
+            // Dependency['type'] value -- 'normal' is company.json's actual
+            // low-severity default.
+            type: (d.dependency_type || 'normal') as Dependency['type'],
+          }))
         : [];
 
       setAgents(mappedAgents);
       setDependencies(mappedDeps);
+      setSpofData(spofsData);
     })
-    .catch((err) => {
-      setError(err.message);
+    .catch((err: unknown) => {
+      setError(err instanceof ApiError ? `${err.status} — ${err.message}` : 'Failed to load dependency map data');
     })
     .finally(() => {
       setLoading(false);
@@ -84,15 +109,9 @@ export default function DependencyMapPage() {
     );
   }
 
-  const spofs = getSPOFs(agents, dependencies);
-  
-  let maxCascadeRisk = 0;
-  agents.forEach(agent => {
-    const victims = getDownstream(agent.id, dependencies);
-    if (victims.size > maxCascadeRisk) {
-      maxCascadeRisk = victims.size;
-    }
-  });
+  const spofCount = spofData?.spofCount ?? 0;
+  const maxCascadeRisk = spofData?.maxCascadeRisk ?? 0;
+  const spofIds = new Set((spofData?.spofs ?? []).map(s => String(s.agentId)));
 
   return (
     <div className="p-6 md:p-10 max-w-7xl mx-auto h-full flex flex-col animate-in fade-in duration-500">
@@ -103,23 +122,29 @@ export default function DependencyMapPage() {
         </p>
       </div>
 
-      <DependencyKPIs 
+      {predictiveRiskUnavailable && (
+        <div className="mb-8">
+          <UnavailableBanner label="Predictive risk scores" />
+        </div>
+      )}
+
+      <DependencyKPIs
         totalAgents={agents.length}
         totalDependencies={dependencies.length}
-        spofCount={spofs.length}
+        spofCount={spofCount}
         maxCascadeRisk={maxCascadeRisk}
       />
 
       <div className="animate-fade-up delay-300 mb-8">
-        <FlowCanvas agents={agents} dependencies={dependencies} />
+        <FlowCanvas agents={agents} dependencies={dependencies} spofIds={spofIds} />
       </div>
 
       {/* Blast Radius Simulator — click any agent, see impact cascade */}
       <div className="mb-8">
-        <BlastRadiusSimulator agents={agents} dependencies={dependencies} />
+        <BlastRadiusSimulator agents={agents} dependencies={dependencies} riskByAgentName={riskByAgentName} />
       </div>
 
-      {/* Hidden Dependency Overlay — transitive / shared-resource / shared-owner edges */}
+      {/* Hidden Dependency Overlay — transitive / same-department / shared-owner edges */}
       <div className="mb-8">
         <HiddenDependencyOverlay agents={agents} dependencies={dependencies} />
       </div>
@@ -130,7 +155,7 @@ export default function DependencyMapPage() {
       </div>
 
       <div className="animate-fade-up delay-400">
-        <DependencyTable agents={agents} dependencies={dependencies} />
+        <DependencyTable agents={agents} dependencies={dependencies} spofIds={spofIds} />
       </div>
     </div>
   );

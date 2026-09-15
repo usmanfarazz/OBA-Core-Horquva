@@ -1,9 +1,20 @@
 const express = require('express')
 const router = express.Router()
 const supabase = require('../supabase')
+const { loadOwnerBackupByEmployee } = require('../lib/ownerBackups')
 
-// GET /api/agents — list all agents with enriched fields
-router.get('/', async (req, res) => {
+/** agent_id -> is_documented, via knowledge_assets where asset_type='agent'.
+ *  null when no assessment exists — never fabricate a default (matches tools.js). */
+async function loadAgentDocumentation() {
+  const { data } = await supabase.from('knowledge_assets').select('asset_id, is_documented').eq('asset_type', 'agent')
+  const byAgent = {}
+  for (const k of data || []) byAgent[k.asset_id] = k.is_documented
+  return byAgent
+}
+
+/** The enriched agent list — pulled out so other routes (decisionIntelligence.js)
+ *  can reuse this exact computation instead of re-deriving owner/backup/documented. */
+async function loadEnrichedAgents() {
   const { data, error } = await supabase
     .from('agents')
     .select(`
@@ -11,10 +22,14 @@ router.get('/', async (req, res) => {
       usage_count, adoption_pct, last_used, cost,
       employees ( id, name, role, department )
     `)
+  if (error) throw new Error(`agents: ${error.message}`)
 
-  if (error) return res.status(500).json({ error: error.message })
+  const [documented, ownerBackups] = await Promise.all([
+    loadAgentDocumentation(),
+    loadOwnerBackupByEmployee(),
+  ])
 
-  const result = data.map(a => ({
+  return data.map(a => ({
     id:          a.id,
     name:        a.name,
     type:        a.type,
@@ -24,21 +39,70 @@ router.get('/', async (req, res) => {
     adoptionPct: a.adoption_pct,
     lastUsed:    a.last_used,
     monthlyCost: a.cost,
-    owner:       a.employees ?? null
+    owner:       a.employees ?? null,
+    // There is no backup_owner column on `agents` — "backup coverage" is a
+    // property of the agent's OWNER, recorded on the `owners` table keyed by
+    // employee_id (see ownership.js). Derived here so every consumer of this
+    // list gets a real value instead of silently reading `undefined` (which
+    // is falsy the same way "genuinely no backup" is, hiding the difference).
+    backup_owner: a.owner_id != null ? (ownerBackups[a.owner_id] ?? null) : null,
+    documented:  a.id in documented ? documented[a.id] : null
   }))
+}
 
-  res.json(result)
+// GET /api/agents — list all agents with enriched fields
+router.get('/', async (req, res) => {
+  try {
+    res.json(await loadEnrichedAgents())
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
 })
 
-// GET /api/agents/orphaned — agents with no owner
-router.get('/orphaned', async (req, res) => {
+// PATCH /api/agents/:id/owner — assign, change, or clear an agent's owner.
+//
+// DATA-1's first slice: the app has always been able to DETECT an unowned or
+// under-covered agent (orphaned list, human-SPOF checks, dependency risk) but
+// had no path to actually fix one — every recommendation it generates was
+// read-only advice with nowhere to go. This is that one write path: it does
+// not attempt the rest of the write loop (backup designation, documentation
+// flags, recommendation resolution, decision approval, automation mode —
+// each is its own decision about validation and UI, deliberately left for
+// its own pass rather than bundled in here).
+//
+// Body: { ownerId: number | null }. `null` clears ownership — a genuine
+// action (e.g. the owner left and there is no replacement yet), not an
+// error, so it is accepted, not rejected.
+router.patch('/:id/owner', async (req, res) => {
+  const agentId = Number(req.params.id)
+  if (!Number.isInteger(agentId)) {
+    return res.status(400).json({ error: 'Invalid agent id' })
+  }
+
+  const { ownerId } = req.body ?? {}
+  if (ownerId !== null && !Number.isInteger(ownerId)) {
+    return res.status(400).json({ error: 'ownerId must be an integer employee id, or null to clear ownership' })
+  }
+
   const { data, error } = await supabase
     .from('agents')
-    .select('id, name, type, status, risk')
-    .is('owner_id', null)
+    .update({ owner_id: ownerId })
+    .eq('id', agentId)
+    .select('id, name, owner_id')
+    .maybeSingle()
 
-  if (error) return res.status(500).json({ error: error.message })
-  res.json({ total: data.length, orphanedAgents: data })
+  if (error) {
+    // Postgres foreign-key violation (agents.owner_id -> employees(id),
+    // declared in sql/05_foreign_keys.sql) — a real, expected outcome for a
+    // bad id, not a server fault.
+    if (error.code === '23503') {
+      return res.status(400).json({ error: `No employee with id ${ownerId}` })
+    }
+    return res.status(500).json({ error: error.message })
+  }
+  if (!data) return res.status(404).json({ error: `No agent with id ${agentId}` })
+
+  res.json({ ok: true, agent: data })
 })
 
 // GET /api/agents/risk-summary — risk breakdown
@@ -75,3 +139,4 @@ router.get('/risk-summary', async (req, res) => {
 })
 
 module.exports = router
+module.exports.loadEnrichedAgents = loadEnrichedAgents

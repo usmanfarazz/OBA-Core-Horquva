@@ -1,12 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo } from 'react';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
-
-interface AgentRow {
-  department: string;
-  criticality: 'critical' | 'high' | 'medium' | 'low';
-}
+import { useAgents } from '../../lib/useAgents';
 
 const RISK_COLORS = {
   critical: '#ef4444',
@@ -15,34 +11,42 @@ const RISK_COLORS = {
   low: '#22c55e'
 };
 
-export function Heatmap() {
-  const [agents, setAgents] = useState<AgentRow[]>([]);
-  const [loading, setLoading] = useState(true);
+interface HeatmapTooltipPayloadEntry {
+  color: string;
+  dataKey: string;
+  value: number;
+}
 
-  useEffect(() => {
-    const base = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '') ?? 'http://localhost:3000';
-    fetch(`${base}/api/agents`)
-      .then(r => r.json())
-      .then(data => {
-        if (Array.isArray(data)) {
-          setAgents(data.map(a => ({
-            ...a,
-            department: a.department || (a.owner && a.owner.department) || 'Unassigned',
-            criticality: a.risk || a.criticality || 'low'
-          })));
-        } else {
-          setAgents([]);
-        }
-      })
-      .catch(() => setAgents([]))
-      .finally(() => setLoading(false));
-  }, []);
+function HeatmapTooltip({ active, payload, label }: { active?: boolean; payload?: HeatmapTooltipPayloadEntry[]; label?: string }) {
+  if (active && payload && payload.length) {
+    return (
+      <div className="bg-[var(--bg-elevated)] border border-[var(--border-default)] p-3 rounded-lg shadow-xl text-sm min-w-[150px]">
+        <p className="font-medium text-[color:var(--text-primary)] mb-2">{label} Department</p>
+        {payload.map((entry, index) => (
+          <div key={index} className="flex justify-between items-center space-x-4 mb-1">
+            <span style={{ color: entry.color }} className="capitalize">{entry.dataKey} Risk</span>
+            <span className="font-semibold text-[color:var(--text-primary)]">{entry.value}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return null;
+}
+
+export function Heatmap() {
+  const { agents, loading, error } = useAgents();
 
   const barData = useMemo(() => {
-    const deps: Record<string, { name: string; critical: number; high: number; medium: number; low: number }> = {};
+    // This chart visualizes SCORED risk severity only -- an 'unknown'
+    // (unscored) agent has no bar series here (F-11) and is deliberately
+    // excluded from the stack rather than counted as a fifth, uncolored
+    // category; `unknown` still needs a slot on the bucket type so the `in`
+    // guard below stays type-safe against the widened RiskLevel.
+    const deps: Record<string, { name: string; critical: number; high: number; medium: number; low: number; unknown: number }> = {};
     agents.forEach(agent => {
       if (!deps[agent.department]) {
-        deps[agent.department] = { name: agent.department, critical: 0, high: 0, medium: 0, low: 0 };
+        deps[agent.department] = { name: agent.department, critical: 0, high: 0, medium: 0, low: 0, unknown: 0 };
       }
       if (agent.criticality in deps[agent.department]) {
         deps[agent.department][agent.criticality] += 1;
@@ -53,23 +57,6 @@ export function Heatmap() {
       (a.critical * 4 + a.high * 3 + a.medium * 2 + a.low)
     );
   }, [agents]);
-
-  const CustomTooltip = ({ active, payload, label }: any) => {
-    if (active && payload && payload.length) {
-      return (
-        <div className="bg-[var(--bg-elevated)] border border-[var(--border-default)] p-3 rounded-lg shadow-xl text-sm min-w-[150px]">
-          <p className="font-medium text-[color:var(--text-primary)] mb-2">{label} Department</p>
-          {payload.map((entry: any, index: number) => (
-            <div key={index} className="flex justify-between items-center space-x-4 mb-1">
-              <span style={{ color: entry.color }} className="capitalize">{entry.dataKey} Risk</span>
-              <span className="font-semibold text-[color:var(--text-primary)]">{entry.value}</span>
-            </div>
-          ))}
-        </div>
-      );
-    }
-    return null;
-  };
 
   return (
     <div className="card p-6 flex flex-col w-full animate-fade-up delay-300">
@@ -86,20 +73,26 @@ export function Heatmap() {
         </div>
       )}
 
-      {!loading && barData.length === 0 && (
+      {!loading && error && (
+        <div className="w-full h-[300px] flex items-center justify-center text-xs text-red-400">
+          Could not load agent data — {error}
+        </div>
+      )}
+
+      {!loading && !error && barData.length === 0 && (
         <div className="w-full h-[300px] flex items-center justify-center text-xs text-[color:var(--text-tertiary)]">
           No agent data available
         </div>
       )}
 
-      {!loading && barData.length > 0 && (
+      {!loading && !error && barData.length > 0 && (
         <div className="w-full h-[300px] min-h-0 min-w-0">
           <ResponsiveContainer width="100%" height={300} minHeight={0}>
             <BarChart data={barData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }} maxBarSize={60}>
               <CartesianGrid strokeDasharray="4 4" vertical={false} stroke="var(--border-subtle)" />
               <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fill: '#8b8b9e', fontSize: 12 }} dy={10} />
               <YAxis axisLine={false} tickLine={false} tick={{ fill: '#8b8b9e', fontSize: 12 }} allowDecimals={false} />
-              <Tooltip content={<CustomTooltip />} cursor={{ fill: 'var(--bg-hover)' }} />
+              <Tooltip content={<HeatmapTooltip />} cursor={{ fill: 'var(--bg-hover)' }} />
               <Bar dataKey="critical" name="Critical" stackId="a" fill={RISK_COLORS.critical} radius={[0, 0, 0, 0]} />
               <Bar dataKey="high" name="High" stackId="a" fill={RISK_COLORS.high} radius={[0, 0, 0, 0]} />
               <Bar dataKey="medium" name="Medium" stackId="a" fill={RISK_COLORS.medium} radius={[0, 0, 0, 0]} />
